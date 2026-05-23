@@ -13,15 +13,30 @@ turning them into real `https://github.com/owner/repo/blob/...` links.
 
 ## Install
 
-Clone this repo wherever you keep tools and symlink the script onto your path:
+1. Clone this repo wherever you keep tools:
 
-```sh
-git clone https://github.com/<you>/remote-ify-links.git ~/dev/remote-ify-links
-ln -s ~/dev/remote-ify-links/remote-ify-links.py ~/.local/bin/remote-ify-links
-```
+   ```sh
+   git clone https://github.com/ejones23/remote-ify-links.git
+   ```
 
-(Adjust the symlink target to wherever `~/.local/bin` or similar lives on your
-system. Make sure that directory is on `$PATH`.)
+2. Make the script available as a command. Pick whichever style fits your
+   workflow — the script is self-contained, so any of these work:
+
+   - **Symlink into a directory on your `$PATH`** (e.g. `~/.local/bin`,
+     `~/bin`, `/usr/local/bin`):
+     ```sh
+     ln -s "$(pwd)/remote-ify-links/remote-ify-links.py" /path/on/your/PATH/remote-ify-links
+     ```
+   - **Add a shell alias** in your shell rc file:
+     ```sh
+     alias remote-ify-links="python3 /full/path/to/remote-ify-links/remote-ify-links.py"
+     ```
+   - **Add the repo directory to your `$PATH`** and rename or symlink the
+     script to drop the `.py` extension if you prefer.
+   - **Just invoke it directly** with `python3 /path/to/remote-ify-links.py`.
+
+   Whichever approach you use, the only requirement is that you can invoke the
+   script from inside any git repo where you want to rewrite links.
 
 ## Usage
 
