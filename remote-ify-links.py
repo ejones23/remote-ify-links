@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
 """
-Rewrite Cascade-style local file links in a Markdown file to GitHub URLs.
+Rewrite Cascade-style local file references in a Markdown file to GitHub URLs.
 
-Cascade emits links like:
+Two input shapes are recognized:
 
-    [main.js](cci:7://file:///abs/path/main.js:0:0-0:0)
-    [foo](cci:1://file:///abs/path/file.js:7:0-13:1)
+1. Cascade IDE link URIs (existing behaviour):
 
-This script rewrites them to:
+       [main.js](cci:7://file:///abs/path/main.js:0:0-0:0)
+       [foo](cci:1://file:///abs/path/file.js:7:0-13:1)
 
-    [main.js](https://github.com/<owner>/<repo>/blob/<ref>/<relpath>)
-    [foo](https://github.com/<owner>/<repo>/blob/<ref>/<relpath>#L7-L13)
+2. Backticked citation references emitted by some Cascade prompt configs:
+
+       `@/abs/path/main.js`              -> whole-file link
+       `@/abs/path/main.js:42`           -> single-line link
+       `@/abs/path/main.js:42-58`        -> range link
+
+Both get rewritten to:
+
+    [label](https://github.com/<owner>/<repo>/blob/<ref>/<relpath>[#L<a>[-L<b>]])
+
+For citation references the label is computed: the file's basename is used
+when that basename uniquely identifies a single relpath in the document
+(common case), otherwise the full repo-relative path is used. A line-range
+suffix like `:42-58` is appended to the label so the visible text matches the
+original citation's information density.
 
 By default <ref> is the current branch (`git branch --show-current`).
 Override with --ref.
@@ -40,6 +53,13 @@ CACHE_FILE = Path.home() / ".cache" / "remote-ify-links" / "cache.json"
 # Matches [label](cci:N://file://<path>:L:C-L:C)
 LINK_RE = re.compile(
     r"\[([^\]]+)\]\(cci:(\d+)://file://(.+?):(\d+):(\d+)-(\d+):(\d+)\)"
+)
+
+# Matches a backticked citation: `@/abs/path[:N[-M]]`
+# Path component disallows backtick (terminator) and colon (line-range
+# separator); both are unconventional in real filesystem paths.
+CITATION_RE = re.compile(
+    r"`@(/[^`:\s]+)(?::(\d+)(?:-(\d+))?)?`"
 )
 
 
@@ -144,18 +164,49 @@ def build_github_url(owner: str, repo: str, ref: str, relpath: str,
     return f"{base}#L{start}-L{end}"
 
 
-def rewrite(text: str, owner: str, repo: str, ref: str, repo_root: Path) -> str:
-    warnings: list[str] = []
+def _resolve_in_repo(abs_path: str, repo_root: Path) -> str | None:
+    """Return repo-relative POSIX path, or None if outside the repo."""
+    try:
+        return Path(abs_path).resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        return None
 
-    def replace(match: re.Match) -> str:
+
+def _basename_uniqueness(text: str, repo_root: Path) -> dict[str, bool]:
+    """Scan citations in `text` and return {relpath: basename_is_unique}.
+
+    A basename is "unique" when it maps to exactly one relpath across all
+    repo-internal citations in the document.
+    """
+    basenames: dict[str, set[str]] = {}
+    for m in CITATION_RE.finditer(text):
+        relpath = _resolve_in_repo(m.group(1), repo_root)
+        if relpath is None:
+            continue
+        bn = relpath.rsplit("/", 1)[-1]
+        basenames.setdefault(bn, set()).add(relpath)
+
+    unique: dict[str, bool] = {}
+    for bn, paths in basenames.items():
+        is_unique = len(paths) == 1
+        for p in paths:
+            unique[p] = is_unique
+    return unique
+
+
+def rewrite(text: str, owner: str, repo: str, ref: str, repo_root: Path) -> str:
+    # Resolve once so symlinked roots (e.g. /tmp -> /private/tmp on macOS) and
+    # `..` segments don't cause spurious "outside repo" misses when comparing
+    # against `Path(abs_path).resolve()`.
+    repo_root = repo_root.resolve()
+    warnings: list[str] = []
+    relpath_basename_unique = _basename_uniqueness(text, repo_root)
+
+    def replace_link(match: re.Match) -> str:
         label, kind, abs_path, l1, _c1, l2, _c2 = match.groups()
-        abs_path_obj = Path(abs_path).resolve()
-        try:
-            relpath = abs_path_obj.relative_to(repo_root).as_posix()
-        except ValueError:
-            warnings.append(
-                f"skipped (outside repo): {abs_path}"
-            )
+        relpath = _resolve_in_repo(abs_path, repo_root)
+        if relpath is None:
+            warnings.append(f"skipped (outside repo): {abs_path}")
             return match.group(0)
 
         # cci:7 is a whole-file reference; cci:1 has a meaningful line range.
@@ -165,7 +216,38 @@ def rewrite(text: str, owner: str, repo: str, ref: str, repo_root: Path) -> str:
         )
         return f"[{label}]({url})"
 
-    out = LINK_RE.sub(replace, text)
+    def replace_citation(match: re.Match) -> str:
+        abs_path, l1, l2 = match.group(1), match.group(2), match.group(3)
+        relpath = _resolve_in_repo(abs_path, repo_root)
+        if relpath is None:
+            warnings.append(f"skipped (outside repo): {abs_path}")
+            return match.group(0)
+
+        is_range = l1 is not None
+        if is_range:
+            start = int(l1)
+            end = int(l2) if l2 is not None else start
+        else:
+            start = end = 0
+        url = build_github_url(
+            owner, repo, ref, relpath, start, end, is_range
+        )
+
+        # Smart label: basename when unambiguous in this doc, else relpath.
+        # Append the original line-range so the visible text keeps the same
+        # information density as the citation.
+        basename = relpath.rsplit("/", 1)[-1]
+        label_path = (
+            basename if relpath_basename_unique.get(relpath, False) else relpath
+        )
+        if is_range:
+            label = f"{label_path}:{start}" if start == end else f"{label_path}:{start}-{end}"
+        else:
+            label = label_path
+        return f"[{label}]({url})"
+
+    out = LINK_RE.sub(replace_link, text)
+    out = CITATION_RE.sub(replace_citation, out)
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
     return out

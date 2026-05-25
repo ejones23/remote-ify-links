@@ -54,20 +54,42 @@ remote-ify-links --refresh-cache         # re-read this repo's origin URL
 
 ## What it does
 
-Two link shapes are recognized:
+Three input shapes are recognized:
 
 | Cascade format | Becomes |
 |---|---|
 | `[label](cci:7://file:///abs/path:0:0-0:0)` | `[label](https://github.com/owner/repo/blob/<ref>/relpath)` |
 | `[label](cci:1://file:///abs/path:L1:C1-L2:C2)` | `[label](https://github.com/owner/repo/blob/<ref>/relpath#L<L1>-L<L2>)` |
+| `` `@/abs/path[:N[-M]]` `` (backticked citation) | `` [<smart-label>](https://github.com/owner/repo/blob/<ref>/relpath[#L<N>[-L<M>]]) `` |
 
 - `cci:7` is a whole-file reference; the trailing `:0:0-0:0` is dropped.
 - `cci:1` is a symbol/range reference. GitHub only supports line ranges, so
   column information is dropped. Single-line ranges become `#L<n>` instead of
   `#L<n>-L<n>`.
+- The backticked `@/abs/path` citation form is what some Cascade prompt
+  configs emit inline (e.g. `` `@/Users/me/proj/src/foo.py:5-10` ``). The
+  visible label uses the file's basename when that basename uniquely
+  identifies a single relpath in the document, otherwise the full
+  repo-relative path. The line range is appended to the label so the rendered
+  text keeps the same information density as the citation. Bare,
+  un-backticked `@/...` references are left alone to avoid false positives in
+  prose.
 - Links to paths outside the current repo are left unchanged (with a warning
   to stderr).
 - Links already pointing at `https://github.com/...` are left unchanged.
+
+## Tests
+
+Unit tests live under `tests/` and use only the standard library:
+
+```sh
+python3 -m unittest discover tests
+```
+
+Whole-document regression cases live in `tests/fixtures/` as paired
+`*.input.md` / `*.expected.md` files. Add a new pair when you encounter a
+real PR draft the script handles wrong, then fix the script until the
+fixture round-trips.
 
 ## Cache
 
