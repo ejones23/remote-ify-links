@@ -167,5 +167,76 @@ class FixtureRoundTripTests(unittest.TestCase):
                 self.assertEqual(got, want, f"fixture {name!r} mismatch")
 
 
+class PickRemoteTests(unittest.TestCase):
+    """`_pick_remote` should select the current branch's configured upstream.
+
+    Each test builds a throwaway git repo in a temp dir, configures remotes,
+    and verifies the selection logic. No network access — `git remote add`
+    only stores the URL string.
+    """
+
+    def setUp(self):
+        import subprocess
+        import tempfile
+
+        self._subprocess = subprocess
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name).resolve()
+
+        def g(*args: str, check: bool = True) -> str:
+            r = subprocess.run(
+                ["git", *args], cwd=self.repo,
+                capture_output=True, text=True, check=check,
+            )
+            return r.stdout.strip()
+
+        self.g = g
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@example.com")
+        g("config", "user.name", "Test")
+        # one commit so we can have a branch to checkout
+        (self.repo / "README.md").write_text("hi\n")
+        g("add", "README.md")
+        g("commit", "-q", "-m", "init")
+        g("remote", "add", "origin", "https://github.com/upstream/repo.git")
+        g("remote", "add", "fork", "https://github.com/me/repo.git")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_uses_branch_upstream_when_configured(self):
+        # Create a branch and configure its upstream to `fork`.
+        self.g("checkout", "-q", "-b", "feature/x")
+        self.g("config", "branch.feature/x.remote", "fork")
+        self.assertEqual(_mod._pick_remote(self.repo), "fork")
+
+    def test_falls_back_to_origin_with_warning(self):
+        self.g("checkout", "-q", "-b", "feature/y")
+        # No branch.<name>.remote configured.
+        # Capture the warning.
+        from io import StringIO
+        old_stderr, sys.stderr = sys.stderr, StringIO()
+        try:
+            picked = _mod._pick_remote(self.repo)
+            warnings = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old_stderr
+        self.assertEqual(picked, "origin")
+        self.assertIn("no configured upstream remote", warnings)
+        self.assertIn("feature/y", warnings)
+
+    def test_get_repo_info_uses_named_remote(self):
+        # Redirect the on-disk cache so the user's real cache isn't polluted.
+        original_cache = _mod.CACHE_FILE
+        _mod.CACHE_FILE = self.repo / "cache.json"
+        try:
+            owner, repo = _mod.get_repo_info(self.repo, "fork", refresh=True)
+            self.assertEqual((owner, repo), ("me", "repo"))
+            owner, repo = _mod.get_repo_info(self.repo, "origin", refresh=True)
+            self.assertEqual((owner, repo), ("upstream", "repo"))
+        finally:
+            _mod.CACHE_FILE = original_cache
+
+
 if __name__ == "__main__":
     unittest.main()

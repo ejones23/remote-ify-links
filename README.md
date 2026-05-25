@@ -44,13 +44,34 @@ Run the script from anywhere inside the git repo whose links you want to
 rewrite. The current branch is auto-detected as the link ref.
 
 ```sh
-remote-ify-links input.md                # print to stdout
-remote-ify-links input.md -o out.md      # write to a new file
-remote-ify-links input.md --in-place     # rewrite in place
-remote-ify-links input.md --ref master   # use a specific branch/tag/SHA
-cat input.md | remote-ify-links          # read from stdin
-remote-ify-links --refresh-cache         # re-read this repo's origin URL
+remote-ify-links input.md                  # print to stdout
+remote-ify-links input.md -o out.md        # write to a new file
+remote-ify-links input.md --in-place       # rewrite in place
+remote-ify-links input.md --ref master     # use a specific branch/tag/SHA
+remote-ify-links input.md --remote origin  # force a specific remote
+cat input.md | remote-ify-links            # read from stdin
+remote-ify-links --refresh-cache           # re-read this repo's remote URL
 ```
+
+## Remote auto-detection
+
+The script picks the GitHub `owner/repo` from the **current branch's
+configured upstream remote** (`git config branch.<name>.remote`), not blindly
+from `origin`. This matters when working in a fork:
+
+```
+origin   https://github.com/upstream/repo.git   # the project you're contributing to
+fork     https://github.com/me/repo.git         # your personal fork (where the branch lives)
+```
+
+After `git push -u fork my-feature`, the script will produce links pointing
+at `github.com/me/repo/blob/my-feature/...`, which is where the branch
+actually lives during PR review. Linking against `origin` would 404 because
+the branch was never pushed there.
+
+If the current branch has no configured upstream remote, the script falls
+back to `origin` and emits a warning. Pass `--remote NAME` to override
+explicitly.
 
 ## What it does
 

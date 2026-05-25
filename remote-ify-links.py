@@ -128,20 +128,35 @@ def get_repo_root() -> Path:
     return Path(root).resolve()
 
 
-def get_repo_info(repo_root: Path, refresh: bool = False) -> tuple[str, str]:
-    """Return (owner, repo) for the given repo root, using the cache when available."""
-    key = str(repo_root)
+def get_repo_info(repo_root: Path, remote_name: str = "origin",
+                  refresh: bool = False) -> tuple[str, str]:
+    """Return (owner, repo) for the named remote in this repo.
+
+    Cache key is `<repo_root>::<remote_name>` so different remotes within the
+    same repo don't collide (e.g. `origin` -> upstream, `fork` -> personal).
+    """
+    key = f"{repo_root}::{remote_name}"
     cache = load_cache()
     entry = None if refresh else cache.get(key)
     if entry and "owner" in entry and "repo" in entry:
         return entry["owner"], entry["repo"]
 
-    remote = run_git("remote", "get-url", "origin", cwd=repo_root)
-    parsed = parse_remote_url(remote)
+    remote_url = run_git("remote", "get-url", remote_name, cwd=repo_root)
+    if not remote_url:
+        sys.exit(
+            f"error: remote {remote_name!r} has no URL configured (or doesn't "
+            f"exist). Configured remotes:\n"
+            + (run_git("remote", "-v", cwd=repo_root) or "  (none)")
+        )
+    parsed = parse_remote_url(remote_url)
     if not parsed:
-        sys.exit(f"error: could not parse GitHub URL from origin remote: {remote!r}")
+        sys.exit(
+            f"error: could not parse GitHub URL from {remote_name!r} remote: "
+            f"{remote_url!r}"
+        )
     owner, repo = parsed
-    cache[key] = {"remote_url": remote, "owner": owner, "repo": repo}
+    cache[key] = {"remote_name": remote_name, "remote_url": remote_url,
+                  "owner": owner, "repo": repo}
     save_cache(cache)
     return owner, repo
 
@@ -152,6 +167,16 @@ def get_current_branch() -> str:
         sys.exit("error: could not determine current git branch (detached HEAD?). "
                  "Pass --ref explicitly.")
     return branch
+
+
+def get_branch_remote(branch: str, repo_root: Path) -> str:
+    """Return the configured push/tracking remote for `branch`, or empty string.
+
+    Reads `branch.<name>.remote` from git config — the canonical answer for
+    "where does this branch live?" once it has been pushed once with -u or
+    explicitly configured. Returns '' if no upstream is set.
+    """
+    return run_git("config", f"branch.{branch}.remote", cwd=repo_root)
 
 
 def build_github_url(owner: str, repo: str, ref: str, relpath: str,
@@ -253,6 +278,27 @@ def rewrite(text: str, owner: str, repo: str, ref: str, repo_root: Path) -> str:
     return out
 
 
+def _pick_remote(repo_root: Path) -> str:
+    """Auto-pick the remote to link against.
+
+    Prefers the current branch's configured upstream remote (the place the
+    branch is actually pushed to). Falls back to 'origin' with a stderr
+    warning so PR-description links keep working from forks.
+    """
+    branch = run_git("branch", "--show-current", cwd=repo_root)
+    if branch:
+        configured = get_branch_remote(branch, repo_root)
+        if configured:
+            return configured
+        print(
+            f"warning: branch {branch!r} has no configured upstream remote; "
+            f"falling back to 'origin'. If this branch lives on a fork, push "
+            f"it with `git push -u <remote> {branch}` or pass --remote.",
+            file=sys.stderr,
+        )
+    return "origin"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -263,15 +309,24 @@ def main() -> None:
                         help="Rewrite the input file in place")
     parser.add_argument("--ref", help="Git ref (branch/tag/SHA) to link against. "
                                       "Defaults to the current branch.")
+    parser.add_argument("--remote", help="Remote name whose owner/repo should be "
+                                          "used for the GitHub URL. Defaults to "
+                                          "the current branch's configured "
+                                          "upstream remote, falling back to "
+                                          "'origin' if none is set.")
     parser.add_argument("--refresh-cache", action="store_true",
-                        help="Re-read origin remote URL even if cached")
+                        help="Re-read the remote URL even if cached")
     args = parser.parse_args()
 
+    repo_root_for_refresh = None
     if args.refresh_cache and not args.input:
         # Just refresh and exit
-        repo_root = get_repo_root()
-        owner, repo = get_repo_info(repo_root, refresh=True)
-        print(f"Cached: {owner}/{repo} (root={repo_root})", file=sys.stderr)
+        repo_root_for_refresh = get_repo_root()
+        remote_name = args.remote or _pick_remote(repo_root_for_refresh)
+        owner, repo = get_repo_info(repo_root_for_refresh, remote_name,
+                                    refresh=True)
+        print(f"Cached: {owner}/{repo} via remote {remote_name!r} "
+              f"(root={repo_root_for_refresh})", file=sys.stderr)
         return
 
     if args.in_place and not args.input:
@@ -285,7 +340,9 @@ def main() -> None:
         text = sys.stdin.read()
 
     repo_root = get_repo_root()
-    owner, repo = get_repo_info(repo_root, refresh=args.refresh_cache)
+    remote_name = args.remote or _pick_remote(repo_root)
+    owner, repo = get_repo_info(repo_root, remote_name,
+                                refresh=args.refresh_cache)
     ref = args.ref or get_current_branch()
 
     rewritten = rewrite(text, owner, repo, ref, repo_root)
